@@ -1,0 +1,108 @@
+base_config:
+- config/logging.yaml
+- config/wandb.yaml
+- config/dataset_depth/dataset_train.yaml
+- config/dataset_depth/dataset_val.yaml
+- config/dataset_depth/dataset_vis.yaml
+
+# logging
+seed: 0
+output_dir: output
+exp_name: ppd+meanflow_fp16
+logging_dir: logs
+resume_step: 0
+do_sanity_check: True
+
+# training
+batch_size: 16    # total batch size, each gpu gets 'batch_size // num_processes'!
+gradient_accumulation_steps: 1
+
+max_train_steps: 40000
+
+checkpointing_steps: 2000
+visualization_steps: 1000
+logging_steps: 100
+
+vis_sampling_steps: [1, 2, 4]
+
+# model
+checkpoint_dir: checkpoints/
+image_encoder: depth_anything_v2
+# time_embedding: single # [single, dual_v1, dual_v2,...]
+ema: False
+teacher: True
+
+# timesteps
+T: 1000
+num_train_timesteps: 50
+ratio_r_equal_t: 0.5
+
+# dataset
+data_dir: /data1/yhyun225/dataset/marigold_dataset/train
+depth_normalization:
+  type: scale_shift_depth
+  clip: true
+  norm_min: -0.5
+  norm_max: 0.5
+  min_max_quantile: 0.02
+
+augmentation:
+  lr_flip_p: 0.5
+
+gt_depth_type: depth_raw_norm
+gt_mask_type: valid_mask_raw
+depth_target_type: log_depth
+
+# dataloader
+num_workers: 4
+shuffle: True
+drop_last: True
+
+# optimization
+learning_rate: 1e-4
+adam_beta1: 0.9
+adam_beta2: 0.999 # 0.95
+adam_weight_decay: 0.
+adam_epsilon: 1e-08
+
+max_grad_norm: 1.0
+
+# weighting: adaptive
+# adaptive_p: 1.0
+
+# loss
+loss:
+  name: mse_loss
+  kwargs:
+    reduction: mean
+
+# precision
+mixed_precision: 'fp16'
+allow_tf32: True
+
+
+# Light setting for the in-training validation and visualization
+validation:
+  denoising_steps: 1
+  ensemble_size: 1
+  processing_res: 0
+  match_input_res: false
+  resample_method: bilinear
+  main_val_metric: abs_relative_difference
+  main_val_metric_goal: minimize
+  init_seed: 2024
+
+eval:
+  alignment: least_square
+  align_max_res: null
+  eval_metrics:
+  - abs_relative_difference
+  - squared_relative_difference
+  - rmse_linear
+  - rmse_log
+  - log10
+  - delta1_acc
+  - delta2_acc
+  - delta3_acc
+  - i_rmse
+  - silog_rmse
