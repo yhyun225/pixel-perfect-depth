@@ -8,7 +8,7 @@ base_config:
 # logging
 seed: 0
 output_dir: output
-exp_name: ppd+consistency_lr_1e-6
+exp_name: ppd+consistency_lr_4e-7
 logging_dir: logs
 resume_step: 0
 do_sanity_check: True
@@ -25,7 +25,7 @@ logging_steps: 10
 
 vis_sampling_steps: [1, 2, 4]
 
-interpolate_gt: False
+reconstruction_loss: False
 
 # model
 checkpoint_dir: checkpoints/
@@ -63,7 +63,7 @@ drop_last: True
 
 # optimization
 use_8bit_adam: False
-learning_rate: 1e-6 #1e-4
+learning_rate: 4e-7 #1e-4
 adam_beta1: 0.9
 adam_beta2: 0.999 # 0.95
 adam_weight_decay: 0.

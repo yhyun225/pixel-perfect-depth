@@ -50,7 +50,10 @@ def get_loss(loss_name, **kwargs):
     return criterion
 
 class GradientMatchingLoss:
-    pass
+    def __init__(self) -> None:
+        pass
+    def __call__(self, pred, gt):
+        pass
 
 class L1LossWithMask:
     def __init__(self, batch_reduction=False):

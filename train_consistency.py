@@ -567,16 +567,18 @@ def main(args):
                     mask = (s <= 0).view(-1, 1, 1, 1)
                     x_0_target = torch.where(mask, depth_gt, x_0_target)
                 
-                if args.interpolate_gt:
-                    _t = t.view(-1, 1, 1, 1)
-                    x_0_target = (1 - _t) * x_0_target + _t * depth_gt
-
-                # loss_mean_ref = torch.mean((error ** 2))
                 if valid_depth_mask is not None:
                     pred_x0_student = pred_x0_student[valid_depth_mask]
                     x_0_target = x_0_target[valid_depth_mask]
                 
-                loss = loss_func(pred_x0_student.float(), x_0_target.float())
+                loss_consistency = loss_func(pred_x0_student.float(), x_0_target.float())
+
+                if args.reconstruction_loss:
+                    loss_recons = loss_func(pred_x0_student.float(), depth_gt[valid_depth_mask].float())
+                    _t = t.view(-1, 1, 1, 1)
+                    loss = (1 - _t) * loss_recons + _t * loss_consistency
+                else:
+                    loss = loss_consistency
 
                 ## optimization
                 accelerator.backward(loss)
