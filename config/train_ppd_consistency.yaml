@@ -41,7 +41,7 @@ T: 1000
 num_train_timesteps: 50
 
 # dataset
-data_dir: /data1/yhyun225/dataset/marigold_dataset/train
+data_dir: /root/marigold_dataset/train
 depth_normalization:
   type: scale_shift_depth
   clip: true
