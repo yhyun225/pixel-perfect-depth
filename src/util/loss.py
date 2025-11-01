@@ -44,16 +44,81 @@ def get_loss(loss_name, **kwargs):
         criterion = L1LossWithMask(**kwargs)
     elif "mean_abs_rel" == loss_name:
         criterion = MeanAbsRelLoss()
+    elif 'gradient_loss' == loss_name:
+        criterion = GradientMatchingLoss()
+    elif 'multi_scale_gradient_loss' == loss_name:
+        criterion = MultiScaleGradientMatchingLoss(**kwargs)
     else:
         raise NotImplementedError
 
     return criterion
 
+# Scale shift invariant Gradient matching loss proposed in https://arxiv.org/pdf/1907.01341 (MIDAS)
+# apply only on single scale
 class GradientMatchingLoss:
-    def __init__(self) -> None:
+    def __init__(self):
         pass
-    def __call__(self, pred, gt):
-        pass
+    
+    def grad(self, R):
+        """
+        Args:
+            R ('torch.Tensor'): difference between gt & prediction, 'R' term in MIDAS paper.
+        """
+        grad_x = R[..., :, 1:] - R[..., :, :-1]
+        grad_y = R[..., 1:, :] - R[..., :-1, :]
+
+        return grad_x, grad_y
+
+    def __call__(self, depth_pred, depth_gt, mask):
+        N = torch.sum(mask)     # number of valid pixels
+        depth_diff = depth_pred - depth_gt
+        grad_x, grad_y = self.grad(depth_diff)
+
+        # vertical
+        grad_x = torch.abs(grad_x)
+        mask_x = mask[..., :, 1:] * mask[..., :, :-1]
+        grad_x = grad_x * mask_x
+
+        # horizontal
+        grad_y = torch.abs(grad_y)
+        mask_y = mask[..., 1:, :] * mask[..., :-1, :]
+        grad_y = grad_y * mask_y
+
+        # gradient loss
+        loss = torch.sum(grad_x) + torch.sum(grad_y)
+        loss = loss / N
+
+        return loss
+
+# Scale shift invariant Gradient matching loss proposed in https://arxiv.org/pdf/1907.01341 (MIDAS)
+# apply only on multi scale
+class MultiScaleGradientMatchingLoss:
+    def __init__(self, k=4):
+        self.k = k      # number of scales
+
+# weighted multi-directional gradient loss, adopted from https://github.com/indu1ge/DepthMaster/blob/main/src/util/loss.py
+# modified from the original implementation
+class HuberLoss:
+    def __init__(self, delta=0.2):
+        self.delta = delta
+        
+    def __call__(self, depth_pred, depth_gt, valid_mask=None):
+        # Huber loss
+        # Compute the difference between predicted and ground truth values
+        diff = depth_gt - depth_pred
+        
+        # Compute absolute difference and squared difference
+        abs_diff = torch.abs(diff)
+        squared_diff = diff ** 2
+        
+        # Use conditional selection between L2 loss and L1 loss
+        loss = torch.where(abs_diff > self.delta, 0.5 * squared_diff, self.delta * abs_diff - 0.5 * self.delta ** 2)
+        
+        # Return the mean loss over all valid samples
+        if valid_mask is not None:
+            return torch.mean(loss[valid_mask])
+        else:
+            return torch.mean(loss)
 
 class L1LossWithMask:
     def __init__(self, batch_reduction=False):

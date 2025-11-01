@@ -46,6 +46,7 @@ class HypersimDepthDataset(BaseDepthDataset):
             max_depth=65.0,
             has_filled_depth=False,
             name_mode=DepthFileNameMode.rgb_i_d,
+            epsilon=1e-3,
             **kwargs,
         )
 

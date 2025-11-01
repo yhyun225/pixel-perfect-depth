@@ -221,6 +221,7 @@ if "__main__" == __name__:
             rgb_int = batch["rgb_int"].squeeze().numpy().astype(np.uint8)  # [3, H, W]
             rgb_int = np.moveaxis(rgb_int, 0, -1)  # [H, W, 3]
             H, W = rgb_int.shape[:2]
+            bgr_int = rgb_int[..., ::-1]
 
             # Random number generator
             if seed is None:
@@ -229,8 +230,9 @@ if "__main__" == __name__:
                 generator = torch.Generator(device=device)
                 generator.manual_seed(seed)
 
-            # Perform inference
-            depth, _ = model.infer_image(rgb_int)   # [b, 1, h, w]
+            # Perform inference 
+            # NOTE: model.infer_image() gets 'bgr' channel input!
+            depth, _ = model.infer_image(bgr_int)   # [b, 1, h, w]
             depth = F.interpolate(depth, size=(H, W), mode='bilinear', align_corners=False)[0, 0]
             depth = depth.detach().cpu().numpy()     # [h, w]
 

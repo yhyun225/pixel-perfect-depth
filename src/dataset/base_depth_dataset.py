@@ -76,6 +76,7 @@ class BaseDepthDataset(Dataset):
         move_invalid_to_far_plane: bool = True,
         rgb_transform=lambda x: x / 255.0 * 2 - 1,  #  [0, 255] -> [-1, 1],
         target_type: str = "depth", # "depth", "disparity", "sqrt_disparity", "log_depth"
+        epsilon: float = 1e-3,
         **kwargs,
     ) -> None:
         super().__init__()
@@ -92,6 +93,7 @@ class BaseDepthDataset(Dataset):
         self.min_depth = min_depth
         self.max_depth = max_depth
         self.target_type = target_type
+        self.epsilon = epsilon
 
         # training arguments
         self.depth_transform: DepthNormalizerBase = depth_transform
@@ -224,7 +226,7 @@ class BaseDepthDataset(Dataset):
         ).bool()
         return valid_mask
 
-    def _training_preprocess(self, rasters, epsilon=1.):
+    def _training_preprocess(self, rasters):
         # Augmentation
         if self.augm_args is not None:
             rasters = self._augment_data(rasters)
@@ -243,9 +245,9 @@ class BaseDepthDataset(Dataset):
                     depth2disparity(rasters["depth_filled_linear"]).clone()
                 )
         elif self.target_type == "log_depth":
-            rasters["depth_raw_linear"] = torch.log(rasters["depth_raw_linear"] + epsilon).clone()
+            rasters["depth_raw_linear"] = torch.log(rasters["depth_raw_linear"] + self.epsilon).clone()
             if self.has_filled_depth:
-                rasters["depth_filled_linear"] = torch.log(rasters["depth_filled_linear"] + epsilon).clone()
+                rasters["depth_filled_linear"] = torch.log(rasters["depth_filled_linear"] + self.epsilon).clone()
 
         # Normalization
         rasters["depth_raw_norm"] = self.depth_transform(

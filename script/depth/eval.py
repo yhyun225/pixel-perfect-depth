@@ -211,7 +211,7 @@ if "__main__" == __name__:
             )
             # convert to depth
             # depth_pred = np.exp(log_depth_pred.squeeze(0)) - 1.
-            depth_pred = np.exp(log_depth_pred)- 1.
+            depth_pred = np.exp(log_depth_pred) - 1.
 
         # Clip to dataset min max
         depth_pred = np.clip(

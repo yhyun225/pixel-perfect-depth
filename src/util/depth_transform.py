@@ -100,7 +100,9 @@ class ScaleShiftDepthNormalizer(DepthNormalizerBase):
 
         if valid_mask is None:
             valid_mask = torch.ones_like(depth_linear).bool()
-        valid_mask = valid_mask & (depth_linear > 0)
+        # 
+        # valid_mask = valid_mask & (depth_linear > 0)
+        valid_mask = valid_mask & (depth_linear.exp() > 0)
 
         # Take quantiles as min and max
         _min, _max = torch.quantile(

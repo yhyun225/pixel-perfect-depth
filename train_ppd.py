@@ -12,6 +12,7 @@ from collections import OrderedDict
 import json
 from omegaconf import OmegaConf
 import matplotlib
+import matplotlib.pyplot as plt
 
 import numpy as np
 import torch
@@ -43,6 +44,10 @@ from src.util.depth_transform import (
 )
 from src.util.config_util import recursive_load_config
 from src.util.loss import get_loss
+
+from src.util.alignment import (
+    align_depth_least_square
+)
 
 import math
 
@@ -209,7 +214,7 @@ def sanity_check(
 #                                 Visualization                                 #
 #################################################################################
 @torch.no_grad()
-def visualize(args, model, semantics_encoder, vis_loaders, save_dir, train_timesteps, device, sampling_steps=1, pred_only=True):
+def visualize(args, model, semantics_encoder, vis_loaders, save_dir, device, sampling_steps=1, save_error_map=True):
     cmap = matplotlib.colormaps.get_cmap('Spectral')
     
     model.eval()
@@ -219,12 +224,11 @@ def visualize(args, model, semantics_encoder, vis_loaders, save_dir, train_times
             # Read input image
             image = batch["rgb_int"].to(device) / 255.0 # check image size
             
-            depth = infer_model_consistency_sampling(
+            depth = infer_model_euler_method(
                 args=args,
                 model=model,
                 semantic_encoder=semantics_encoder,
                 image=image,
-                train_timesteps=train_timesteps,
                 device=device,
                 sampling_steps=sampling_steps,
             )
@@ -240,7 +244,45 @@ def visualize(args, model, semantics_encoder, vis_loaders, save_dir, train_times
 
             cv2.imwrite(os.path.join(save_dir, image_name + '_grey.png'), vis_depth)
             cv2.imwrite(os.path.join(save_dir, image_name + '_color.png'), vis_depth_color)
-    
+
+            if save_error_map:
+                save_dir_error_map = os.path.join(save_dir, 'error_map')
+                os.makedirs(save_dir_error_map, exist_ok=True)
+
+                depth_raw = batch["depth_raw_linear"].squeeze().cpu().numpy()
+                valid_mask = batch["valid_mask_raw"].squeeze().cpu().numpy()
+
+                gt_log_depth = np.log(depth_raw + 1e-3)
+
+                log_depth_pred, scale, shift = align_depth_least_square(
+                    gt_arr=gt_log_depth,
+                    pred_arr=depth,
+                    valid_mask_arr=valid_mask,
+                    return_scale_shift=True,
+                    max_resolution=None,
+                )
+                metric_depth = np.exp(log_depth_pred) - 1e-3
+
+                error_map = np.abs(depth_raw - metric_depth)
+                if valid_mask is not None:
+                    error_map = error_map * valid_mask
+                
+                error_map_norm = (error_map - error_map.min()) / (error_map.max() - error_map.min() + 1e-8)
+
+                H, W = error_map_norm.shape
+                dpi = 100
+                fig_h, fig_w = H / dpi, W / dpi
+                fig, ax = plt.subplots(figsize=(fig_w, fig_h), dpi=dpi)
+                
+                im = ax.imshow(error_map_norm, cmap='hot')
+                ax.axis('off')
+
+                cbar = fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+                cbar.set_label('Normalized error')
+
+                plt.savefig(os.path.join(save_dir_error_map, image_name + '_error_map.png'), bbox_inches='tight', pad_inches=0.01)
+                plt.close(fig)
+                    
     return
 
 #################################################################################
@@ -314,7 +356,7 @@ def main(args):
         _k = k.replace('dit.', '')
         _checkpoint[_k] = v
     
-    # 1) Student model: average velocity prediction model
+    # 1) PPD, velocity model
     model = DiT()
     missing_keys, unexpected_keys = model.load_state_dict(_checkpoint, strict=False)
     if accelerator.is_main_process:
@@ -328,13 +370,7 @@ def main(args):
         logger.info("*** Student model initialized!")
         logger.info(f"DiT Parameters: {sum(p.numel() for p in model.parameters()):,}")
 
-    # 2) Teacher model: instantaneous velocity prediction model
-    teacher_model = copy.deepcopy(model)
-    requires_grad(teacher_model, False)
-    if accelerator.is_main_process:
-        logger.info("*** Teacher model initialized!")
-
-    # 3) Create an EMA of the model for use after training
+    # 2) Create an EMA of the model for use after training
     if args.ema:
         ema = deepcopy(model).to(device)
         requires_grad(ema, False)
@@ -343,7 +379,7 @@ def main(args):
     else:
         ema = None
     
-    # 4) Load semantic encoder
+    # 3) Load semantic encoder
     semantics_encoder = DepthAnythingV2(
         encoder='vitl',
         features=256,
@@ -402,6 +438,8 @@ def main(args):
         eps=args.adam_epsilon,
     )
     loss_func = get_loss(loss_name=args.loss.name, **args.loss.kwargs)
+    grad_loss_func = get_loss(loss_name=args.grad_loss.name)
+    lambda_grad = args.grad_loss.lam
     
     # Setup data:
     local_batch_size = int(args.batch_size // accelerator.num_processes)
@@ -497,20 +535,7 @@ def main(args):
     num_train_timesteps = args.num_train_timesteps
 
     schedule = LinearSchedule(T=T)
-    sampling_timesteps = Timesteps(
-        T=T,
-        steps=num_train_timesteps,
-        device=device,
-    )
-    sampler = EulerSampler(
-        schedule=schedule,
-        timesteps=sampling_timesteps,
-        prediction_type='velocity'
-    )
-    timesteps = torch.cat([sampling_timesteps.timesteps, torch.zeros(1, device=device)])
-    train_timesteps_t = timesteps[:-1]
-    train_timesteps_s = timesteps[1:]
-
+    train_timesteps = torch.arange(1000, 0, -1, device=device)
     
     num_update_steps_per_epoch = math.ceil(len(train_dataloader) / accelerator.gradient_accumulation_steps)
     num_train_epochs = math.ceil(args.max_train_steps / num_update_steps_per_epoch)
@@ -552,8 +577,7 @@ def main(args):
 
                 # sample timesteps t & s
                 idx = torch.randint(0, num_train_timesteps, (batch_size,), device=device)
-                t = train_timesteps_t[idx]
-                s = train_timesteps_s[idx]
+                t = train_timesteps[idx]
 
                 # sample noise
                 noise = torch.randn_like(depth_gt)
@@ -562,55 +586,24 @@ def main(args):
                 x_t = schedule.forward(x_0=depth_gt, x_T=noise, t=t)
                 model_input = torch.cat([x_t, cond], dim=1)
 
-                # model predicted 0-pointing velocity
-                pred_u = model(x=model_input, semantics=semantics, timestep=t)
-                pred_x0_student, _ = schedule.convert_from_pred(pred_u, 'velocity', x_t, t)
+                # model prediction
+                pred_v = model(x=model_input, semantics=semantics, timestep=t)
+                pred_x0, _ = schedule.convert_from_pred(pred_v, 'velocity', x_t, t)
 
-                with torch.no_grad():
-                    # Teacher pred x_s: from x_t -> x_s
-                    v_pred_t = teacher_model(x=model_input, semantics=semantics, timestep=t)
-                    x_s = sampler.step(pred=v_pred_t, x_t=x_t, t=t)
+                # target
+                target = noise - depth_gt
 
-                    model_input_target = torch.cat([x_s, cond], dim=1)
-                    pred_v = model(x=model_input_target, semantics=semantics, timestep=s)
-                    x_0_target, _ = schedule.convert_from_pred(pred_v, 'velocity', x_s, s)
+                # losses
+                # 1) Gradient loss
+                grad_loss = grad_loss_func(pred_x0.float(), depth_gt.float(), valid_depth_mask.float())
 
-                    mask = (s <= 0).view(-1, 1, 1, 1)
-                    x_0_target = torch.where(mask, depth_gt, x_0_target)
-                
-                # if valid_depth_mask is not None:
-                #     pred_x0_student = pred_x0_student[valid_depth_mask]
-                #     x_0_target = x_0_target[valid_depth_mask]
-                
-                # consistency loss + reconstruction loss (weighted sum)
-                if args.reconstruction_loss:
-                    # reconstruction loss:      (x_t -> x_0)  <==>  x_0_gt
-                    loss_recons = (
-                        (pred_x0_student.float() - depth_gt.float()) ** 2
-                    )   # (b, c, h, w) 
-
-                    # consistency loss:      (x_t -> x_0)  <==>  (x_s -> x_0)
-                    loss_consistency = (
-                        (pred_x0_student.float() - x_0_target.float()) ** 2
-                    )   # (b, c, h, w)
-
-                    _t = (t / 1000).view(-1, 1, 1, 1)
-                    loss = (1 - _t) * loss_consistency + _t * loss_recons
-                    if valid_depth_mask is not None:
-                        # for logging
-                        loss_consistency = loss_consistency[valid_depth_mask]
-                        loss_recons = loss_recons[valid_depth_mask]
-                        
-                        loss = loss[valid_depth_mask]
-                    
-                    loss = loss.mean()
+                # 2) MSE loss
+                if valid_depth_mask is not None:
+                    mse_loss = loss_func(pred_v[valid_depth_mask].float(), target[valid_depth_mask].float())
                 else:
-                    if valid_depth_mask is not None:
-                        pred_x0_student = pred_x0_student[valid_depth_mask]
-                        x_0_target = x_0_target[valid_depth_mask]
+                    mse_loss = loss_func(pred_v.float(), target.float())
 
-                    # only consistency loss
-                    loss = loss_func(pred_x0_student.float(), x_0_target.float())
+                loss = mse_loss + lambda_grad * grad_loss
 
                 ## optimization
                 accelerator.backward(loss)
@@ -656,34 +649,22 @@ def main(args):
                             semantics_encoder=semantics_encoder,
                             vis_loaders=vis_loaders,
                             save_dir=cur_step_vis_dir,
-                            train_timesteps=timesteps,
                             device=device,
                             sampling_steps=vis_sampling_step
                         )
                 accelerator.wait_for_everyone()
             
-            # logs = {
-            #     "loss": accelerator.gather(loss).mean().detach().item(),
-            #     #"loss_scaled": accelerator.gather(loss).mean().detach().item() * 100,
-            #     # "grad_norm": accelerator.gather(grad_norm).mean().detach().item()
-            # }
-            
             if accelerator.is_main_process:
-                logs = {"loss": loss.mean().detach().item()}
-                if args.reconstruction_loss:
-                    logs.update({
-                        "loss_consistency": loss_consistency.mean().detach().item(),
-                        "loss_reconstruction": loss_recons.mean().detach().item(),
-                    })
-                # logs = accelerator.gather(losses)
-                # logs = {k: v.mean().detach().item() for k, v in losses.items()}
+                logs = {
+                    "loss": loss.mean().detach().item(),
+                    "mse_loss": mse_loss.mean().detach().item(),
+                    "grad_loss": grad_loss.mean().detach().item(),
+                }
                 progress_bar.set_postfix(**logs)
 
             # Log to file periodically
-            if accelerator.is_main_process and global_step % args.logging_steps == 0:
-                # logger.info(f"Step {global_step}: loss = {logs['loss']:.4f}, loss_scaled(x100) = {logs['loss_scaled']:.4f}, grad_norm = {logs['grad_norm']:.4f}")
-                # logger.info(f"Step {global_step}: loss = {logs['loss']:.8f}, loss_scaled(x100) = {logs['loss_scaled']:.8f}")
-                logger.info(f"Step {global_step}: loss = {logs['loss']:.8f}, loss_consistency = {logs['loss_consistency']:.8f}, loss_reconstruction = {logs['loss_reconstruction']:.8f}")
+            if accelerator.is_main_process and global_step % args.logging_steps == 0 and accelerator.sync_gradients:
+                logger.info(f"Step {global_step}: loss = {logs['loss']:.6f}, MSE loss = {logs['mse_loss']:.6f}, Grad loss = {logs['grad_loss']:.6f}")
 
             if global_step >= args.max_train_steps:
                 break
@@ -702,7 +683,7 @@ def main(args):
 
 def parse_args():
     parser = argparse.ArgumentParser(description="MeanFlow Training")
-    parser.add_argument("--config", type=str, default="config/train_ppd_depth.yaml")
+    parser.add_argument("--config", type=str, default="config/train_ppd.yaml")
     
     args = parser.parse_args()
     
