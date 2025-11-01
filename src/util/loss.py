@@ -38,6 +38,8 @@ def get_loss(loss_name, **kwargs):
         criterion = SILogRMSELoss(**kwargs)
     elif "mse_loss" == loss_name:
         criterion = torch.nn.MSELoss(**kwargs)
+    elif "rmse_loss" == loss_name:
+        criterion = RMSELoss(**kwargs)
     elif "l1_loss" == loss_name:
         criterion = torch.nn.L1Loss(**kwargs)
     elif "l1_loss_with_mask" == loss_name:
@@ -119,6 +121,16 @@ class HuberLoss:
             return torch.mean(loss[valid_mask])
         else:
             return torch.mean(loss)
+
+#  Root mean squared error loss
+class RMSELoss:
+    def __init__(self, eps=1e-8, **kwargs):
+        self.eps = eps
+        self.mse = torch.nn.MSELoss(**kwargs)
+    
+    def __call__(self, depth_pred, depth_gt):
+        return torch.sqrt(self.mse(depth_pred, depth_gt) + self.eps)
+        
 
 class L1LossWithMask:
     def __init__(self, batch_reduction=False):

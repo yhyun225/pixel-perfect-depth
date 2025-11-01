@@ -440,9 +440,21 @@ def main(args):
         weight_decay=args.adam_weight_decay,
         eps=args.adam_epsilon,
     )
+
+    # Loss functions
     loss_func = get_loss(loss_name=args.loss.name, **args.loss.kwargs)
     grad_loss_func = get_loss(loss_name=args.grad_loss.name)
-    lambda_grad = args.grad_loss.lam
+    consistency_loss_func = get_loss(loss_name=args.consistency_loss.name)
+    
+    lambda_mse = args.lambda_mse
+    lambda_grad = args.lambda_grad
+    lambda_consistency = args.lambda_consistency
+
+    if accelerator.is_main_process:
+        logger.info("Weighted loss using...")
+        logger.info(f"  λ_mse: {lambda_mse}")
+        logger.info(f"  λ_grad: {lambda_grad}")
+        logger.info(f"  λ_consistency: {lambda_consistency}")
     
     # Setup data:
     local_batch_size = int(args.batch_size // accelerator.num_processes)
@@ -614,44 +626,32 @@ def main(args):
 
                     model_input_target = torch.cat([x_s, cond], dim=1)
                     pred_v = model(x=model_input_target, semantics=semantics, timestep=s)
-                    x_0_target, _ = schedule.convert_from_pred(pred_v, 'velocity', x_s, s)
+                    x0_target, _ = schedule.convert_from_pred(pred_v, 'velocity', x_s, s)
 
                     mask = (s <= 0).view(-1, 1, 1, 1)
-                    x_0_target = torch.where(mask, depth_gt, x_0_target)
+                    x0_target = torch.where(mask, depth_gt, x0_target)
                 
                 # if valid_depth_mask is not None:
                 #     pred_x0_student = pred_x0_student[valid_depth_mask]
                 #     x_0_target = x_0_target[valid_depth_mask]
                 
-                # consistency loss + reconstruction loss (weighted sum)
-                if args.reconstruction_loss:
-                    # reconstruction loss:      (x_t -> x_0)  <==>  x_0_gt
-                    loss_recons = (
-                        (pred_x0_student.float() - depth_gt.float()) ** 2
-                    )   # (b, c, h, w) 
+                # consistency loss + reconstruction loss (not weighted sum)
+                # 1) Gradient loss
+                grad_loss = grad_loss_func(pred_x0_student.float(), depth_gt.float(), valid_depth_mask.float())
 
-                    # consistency loss:      (x_t -> x_0)  <==>  (x_s -> x_0)
-                    loss_consistency = (
-                        (pred_x0_student.float() - x_0_target.float()) ** 2
-                    )   # (b, c, h, w)
-
-                    _t = (t / 1000).view(-1, 1, 1, 1)
-                    loss = (1 - _t) * loss_consistency + _t * loss_recons
-                    if valid_depth_mask is not None:
-                        # for logging
-                        loss_consistency = loss_consistency[valid_depth_mask]
-                        loss_recons = loss_recons[valid_depth_mask]
-                        
-                        loss = loss[valid_depth_mask]
-                    
-                    loss = loss.mean()
+                # 2) MSE loss
+                if valid_depth_mask is not None:
+                    mse_loss = loss_func(pred_x0_student[valid_depth_mask].float(), depth_gt[valid_depth_mask].float())
                 else:
-                    if valid_depth_mask is not None:
-                        pred_x0_student = pred_x0_student[valid_depth_mask]
-                        x_0_target = x_0_target[valid_depth_mask]
-
-                    # only consistency loss
-                    loss = loss_func(pred_x0_student.float(), x_0_target.float())
+                    mse_loss = loss_func(pred_x0_student.float(), depth_gt.float())
+                
+                # 3) Consistency loss
+                if valid_depth_mask is not None:
+                    consistency_loss = consistency_loss_func(pred_x0_student[valid_depth_mask].float(), x0_target[valid_depth_mask].float())
+                else:
+                    consistency_loss = consistency_loss_func(pred_x0_student.float(), x0_target.float())
+                
+                loss = lambda_grad * grad_loss + lambda_mse * mse_loss + lambda_consistency * consistency_loss
 
                 ## optimization
                 accelerator.backward(loss)
@@ -703,28 +703,26 @@ def main(args):
                         )
                 accelerator.wait_for_everyone()
             
-            # logs = {
-            #     "loss": accelerator.gather(loss).mean().detach().item(),
-            #     #"loss_scaled": accelerator.gather(loss).mean().detach().item() * 100,
-            #     # "grad_norm": accelerator.gather(grad_norm).mean().detach().item()
-            # }
-            
             if accelerator.is_main_process:
                 logs = {"loss": loss.mean().detach().item()}
                 if args.reconstruction_loss:
                     logs.update({
-                        "loss_consistency": loss_consistency.mean().detach().item(),
-                        "loss_reconstruction": loss_recons.mean().detach().item(),
+                        "loss": loss.mean().detach().item(),
+                        "consistency_loss": consistency_loss.mean().detach().item(),
+                        "mse_loss": mse_loss.mean().detach().item(),
+                        "grad_loss": grad_loss.mean().detach().item(),
                     })
                 # logs = accelerator.gather(losses)
                 # logs = {k: v.mean().detach().item() for k, v in losses.items()}
                 progress_bar.set_postfix(**logs)
 
             # Log to file periodically
-            if accelerator.is_main_process and global_step % args.logging_steps == 0:
-                # logger.info(f"Step {global_step}: loss = {logs['loss']:.4f}, loss_scaled(x100) = {logs['loss_scaled']:.4f}, grad_norm = {logs['grad_norm']:.4f}")
-                # logger.info(f"Step {global_step}: loss = {logs['loss']:.8f}, loss_scaled(x100) = {logs['loss_scaled']:.8f}")
-                logger.info(f"Step {global_step}: loss = {logs['loss']:.8f}, loss_consistency = {logs['loss_consistency']:.8f}, loss_reconstruction = {logs['loss_reconstruction']:.8f}")
+            if accelerator.is_main_process and global_step % args.logging_steps == 0 and accelerator.sync_gradients:
+                logger.info(f"Step {global_step}: loss = {logs['loss']:.8f}, " \
+                            f"consistency_loss = {logs['consistency_loss']:.8f}, " \
+                            f"mse_loss = {logs['mse_loss']:.8f}, " \
+                            f"grad_loss = {logs['grad_loss']:.8f}" 
+                            )
 
             if global_step >= args.max_train_steps:
                 break

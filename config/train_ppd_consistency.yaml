@@ -8,7 +8,7 @@ base_config:
 # logging
 seed: 0
 output_dir: output
-exp_name: ppd+consistency_weighted_reconstruction_loss_lr_1e-5
+exp_name: ppd+consistency_three_losses
 logging_dir: logs
 resume_step: 0
 do_sanity_check: True
@@ -41,7 +41,7 @@ T: 1000
 num_train_timesteps: 50
 
 # dataset
-data_dir: /data1/yhyun225/dataset/marigold_dataset/train #/root/marigold_dataset/train
+data_dir: /root/marigold_dataset/train #/data1/yhyun225/dataset/marigold_dataset/train
 depth_normalization:
   type: scale_shift_depth
   clip: true
@@ -63,7 +63,7 @@ drop_last: True
 
 # optimization
 use_8bit_adam: False
-learning_rate: 1e-5 #1e-4
+learning_rate: 1e-4 #1e-4
 adam_beta1: 0.9
 adam_beta2: 0.999 # 0.95
 adam_weight_decay: 0.
@@ -80,6 +80,15 @@ loss:
   kwargs:
     reduction: mean
 
+grad_loss:
+  name: gradient_loss
+
+consistency_loss:
+  name: rmse_loss
+
+lambda_mse: 1.0
+lambda_grad: 0.5
+lambda_consistency: 1.0
 # precision
 mixed_precision: 'fp16'
 allow_tf32: True
